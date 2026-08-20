@@ -27,7 +27,11 @@ from enum import Enum
 ALLOWED = {"Apache-2.0", "MIT", "BSD-3-Clause", "CC-BY-4.0", "CC0-1.0", "COCO-WholeBody"}
 #: Permitted but flagged. Share-alike obligations on derived MODELS are legally unsettled;
 #: the COCO filter keeps these behind a `share_alike` column rather than deciding for the org.
-FLAGGED = {"CC-BY-SA-4.0", "OpenRAIL-M", "CreativeML-OpenRAIL-M", "CreativeML-OpenRAIL++-M"}
+FLAGGED = {"CC-BY-SA-4.0"}
+#: OpenRAIL-M depends on ROLE, not on the weights. Blocked as a generator, permitted as
+#: passthrough -- see CLAUDE.md. `classify` therefore takes a role, and a caller that does not
+#: state one gets the strict answer rather than a convenient default.
+OPENRAIL = {"OpenRAIL-M", "CreativeML-OpenRAIL-M", "CreativeML-OpenRAIL++-M"}
 #: Distributed only behind a registration form. The terms cannot be read without accepting
 #: them, so they cannot be gated on -- treated as DENIED until someone accepts and reports.
 GATED = {"GATED-UBody", "GATED-acceptance"}
@@ -129,9 +133,25 @@ GENERATORS = [
 #: generating images. Several RAIL-family licences draw that line explicitly.
 
 
-def classify(license_id: str) -> Status:
+class Role(str, Enum):
+    """What the model is FOR. OpenRAIL-M turns on this and nothing else.
+
+    PASSTHROUGH transforms an input the user supplied and returns it -- the provenance stays
+    with one artefact. GENERATOR samples content that becomes a corpus, which propagates the
+    terms into weights where no later check can see them.
+    """
+
+    PASSTHROUGH = "transforms a supplied input and returns it"
+    GENERATOR = "samples content that will be trained on"
+
+
+def classify(license_id: str, role: "Role" = None) -> Status:
     if license_id == "UNVERIFIED":
         return Status.UNVERIFIED
+    if license_id in OPENRAIL:
+        # No role stated is the strict answer, not the permissive one. A caller that has not
+        # said what the model is for has not earned the exemption.
+        return Status.FLAGGED if role is Role.PASSTHROUGH else Status.DENIED
     if license_id in ALLOWED:
         return Status.OK
     if license_id in FLAGGED:
