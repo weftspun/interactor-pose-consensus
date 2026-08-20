@@ -24,10 +24,13 @@ from enum import Enum
 
 # Mirrors filter_coco_licenses.COMMERCIAL_OK. Commercial use and derivatives must both be
 # permitted -- training produces a derivative, so ND fails as surely as NC.
-ALLOWED = {"Apache-2.0", "MIT", "BSD-3-Clause", "CC-BY-4.0", "CC0-1.0"}
+ALLOWED = {"Apache-2.0", "MIT", "BSD-3-Clause", "CC-BY-4.0", "CC0-1.0", "COCO-WholeBody"}
 #: Permitted but flagged. Share-alike obligations on derived MODELS are legally unsettled;
 #: the COCO filter keeps these behind a `share_alike` column rather than deciding for the org.
 FLAGGED = {"CC-BY-SA-4.0", "OpenRAIL-M", "CreativeML-OpenRAIL-M"}
+#: Distributed only behind a registration form. The terms cannot be read without accepting
+#: them, so they cannot be gated on -- treated as DENIED until someone accepts and reports.
+GATED = {"GATED-UBody"}
 
 
 class Status(str, Enum):
@@ -50,20 +53,32 @@ class Backend:
 #: The roster. `checked=False` everywhere until each is read from its release, which is the
 #: point: this table starts out failing.
 ROSTER = [
-    Backend("mediapipe", "Apache-2.0", "Apache-2.0",
-            note="Google; code and bundled tasks both Apache-2.0"),
-    Backend("vitpose", "Apache-2.0", "UNVERIFIED",
-            note="already vendored via transformers; corpus (COCO/MPII/AIC) needs checking"),
-    Backend("gemx", "UNVERIFIED", "UNVERIFIED",
-            note="parametric SOMA-X fit; in-house, but state the terms rather than assume"),
-    Backend("dwpose", "Apache-2.0", "UNVERIFIED",
-            note="IDEA-Research; trained on COCO-WholeBody + UBody -- UBody terms unchecked"),
-    Backend("rtmw", "Apache-2.0", "UNVERIFIED",
-            note="MMPose model zoo; same UBody question as DWPose"),
-    Backend("sdpose", "UNVERIFIED", "UNVERIFIED",
-            note="built on Stable Diffusion; OpenRAIL-M use-restrictions likely propagate"),
-    # Kept in the table with their verdicts rather than deleted. An absent row is
-    # indistinguishable from one nobody considered.
+    # --- the panel ---
+    Backend("mediapipe", "Apache-2.0", "Apache-2.0", checked=True,
+            note="VERIFIED from the release LICENSE. One vendored exception under "
+                 "tasks/cc/text/.../utf/ (Lucent/Plan9), unrelated to pose."),
+    Backend("vitpose", "Apache-2.0", "COCO-WholeBody", checked=True,
+            note="VERIFIED from vendored transformers source (Univ. of Sydney + HuggingFace). "
+                 "Trained on COCO -- see the val2017 note below."),
+    Backend("dwpose", "Apache-2.0", "GATED-UBody", checked=True,
+            note="Weights Apache-2.0, VERIFIED. Corpus is COCO-WholeBody + UBody, and UBody "
+                 "is distributed only through a Google Form -- terms cannot be read without "
+                 "accepting them. Registration-gated corpora are the DeepFashion pattern "
+                 "already blocklisted upstream: a permissive checkpoint re-exporting terms "
+                 "nobody has read."),
+    Backend("rtmw", "Apache-2.0", "GATED-UBody", checked=True,
+            note="MMPose model zoo. Same UBody dependency as DWPose, and NOT independent of "
+                 "it -- DWPose distils from an RTMPose teacher. Seating both would seat one "
+                 "opinion twice."),
+
+    # --- excluded, kept with verdicts attached ---
+    Backend("gemx", "NVIDIA-UNVERIFIED", "UNVERIFIED",
+            note="NVlabs/GEM-X. NVIDIA research code often ships under the NVIDIA Source "
+                 "Code License (non-commercial). UNRESOLVED AND USED IN ANGER: "
+                 "run_gemx_batch.sh already runs commercially-filtered COCO through it."),
+    Backend("sdpose", "OpenRAIL-M", "UNVERIFIED",
+            note="Stable Diffusion derived. OpenRAIL-M is neither NC nor ND, so the COCO "
+                 "filter's categories do not decide it -- a policy call, not a lookup."),
     Backend("sapiens", "CC-BY-NC-4.0", "UNVERIFIED", checked=True,
             note="EXCLUDED: NC is the exact class filter_coco_licenses drops"),
     Backend("openpose", "NON-COMMERCIAL", "UNVERIFIED", checked=True,
@@ -82,6 +97,8 @@ def classify(license_id: str) -> Status:
         return Status.OK
     if license_id in FLAGGED:
         return Status.FLAGGED
+    if license_id in GATED:
+        return Status.DENIED
     return Status.DENIED
 
 

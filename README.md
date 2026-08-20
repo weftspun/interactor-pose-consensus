@@ -1,89 +1,119 @@
 # pose-consensus
 
-Four independent pose estimators behind one interface. A keypoint set is emitted only when
-they agree; **disagreement is a fault, not an average.**
+**The consensus panel is dead.** What remains is the parametric referee: fit ANNY/SOMA-X to a
+set of keypoints and judge whether a human body could hold that pose.
 
-## Why
+The name no longer describes the contents. It is kept for now because the repository was never
+placed in `default.xml`, so renaming is free whenever the surviving part gets a settled scope.
 
-Estimated keypoints are model output. Under the workspace's data-hygiene rule they are
-*generated* synthetic, and the hazard that rule exists to prevent is a corpus that inherits a
-model's errors as if they were facts. One estimator's guess is a claim. Four independent
-estimators landing in the same place is evidence.
+## What was removed, and why
 
-The alternative — averaging, or trusting a single "best" model — launders disagreement into a
-plausible number. A mean of two confident and incompatible skeletons is a skeleton no estimator
-believed. That is the failure this exists to make impossible.
+Retractions stay next to what they retract, so this is recorded rather than quietly deleted.
+`git log` has the code if it is ever wanted back.
 
-## The estimators
+The panel ran three to five independent pose estimators over the same image and emitted
+keypoints only when they agreed. It was built to answer: *what pose is in this picture?* — for
+pictures we did not author. Two things killed it.
 
-Face/head/body throughout — body-only is not enough, because `face`, `irides`, `eyebrow`,
-`eyewhite`, `eyelash`, `nose`, `mouth`, `ears` and `handwear` are nine of the 24 tags and a
-17-point skeleton constrains none of them.
+**It was solving a problem we chose to stop having.** The corpus plan inverted: instead of
+estimating poses from images, ANNY *originates* the pose, renders it, and a diffusion model
+stylizes the render with the geometry pinned. The pose label is then true by construction. You
+do not convene three estimators to adjudicate a pose you authored, so the panel had no question
+left to answer.
 
-| # | backend | keypoints | lineage |
-|---|---|---|---|
-| 1 | **SDPose-Wholebody** | 133 (17+6 feet+68 face+42 hands) | Stable Diffusion priors |
-| 2 | **MediaPipe Holistic** | 33 + 468 face + 21x2 hands | classical CNN, on-device |
-| 3 | **GEM-X** | SOMA-X coefficients | **parametric**, not discriminative |
-| 4 | **DWPose / RTMW** | 133 | MMPose, distillation-trained |
-| 5 | **Sapiens** | 308 | Meta ViT, Humans-300M pretraining |
+**And it could not be assembled anyway.** Licence checking removed every candidate for the
+third seat:
 
-**RF-DETR is excluded**, not forgotten. `rf-detr-cpp/models/heads/keypoints.py` is
-`num_keypoints_per_class`, COCO-17 by default, and `docs/architecture.md` records the keypoint
-training path as "training-only, not needed for the inference port". A wholebody head means a
-new output layer, a retrain upstream, and a re-port -- and no public wholebody checkpoint
-exists. It is listed here so the exclusion is a decision on the record rather than an omission.
+| backend | outcome |
+|---|---|
+| MediaPipe | Apache-2.0, verified from the release — the one survivor |
+| ViTPose | Apache-2.0, verified from vendored `transformers` source |
+| Sapiens | CC-BY-NC — the exact class `filter_coco_licenses.py` drops |
+| DWPose / RTMW | Apache-2.0 weights, but trained on UBody, distributed only behind a form |
+| GEM-X | NVlabs, terms unresolved |
+| SDPose | OpenRAIL-M use-restrictions, undecided |
+| OpenPose, AlphaPose | non-commercial |
+| RF-DETR | COCO-17 head, no wholebody checkpoint |
 
-Lineage diversity is the whole point, not count. Correlated failure is what defeats a panel:
-five models sharing an ancestor agree on their shared mistakes and certify them. Hence one
-diffusion-prior model, one classical CNN, one parametric fit, one distillation-trained, one
-large-pretraining ViT.
+Two verified backends is not a panel. Quorum needs three to tolerate a single outage.
 
-## Panel size
+**A third finding made the survivors weaker than they looked.** Both remaining backends are
+discriminative and COCO-trained, so their errors correlate — a hard occlusion misleads them in
+the same direction. Agreement between two COCO-trained networks on a COCO-like image is much
+weaker evidence than it appears, which is why majority voting was never the right rule here
+even when there were enough voters for it.
 
-Odd sizes, because even ones tie:
+## What survives: the referee
 
-| N | may be unavailable | quorum |
-|---|---|---|
-| 3 | 1 | 2 |
-| 5 | 2 | 3 |
-| 7 | 3 | 4 |
+`python/soma_referee.py`. A parametric model **cannot represent an impossible skeleton** —
+that property, not the vote, was the whole reason a parametric member was wanted. It does not
+need GEM-X. It needs a parametric human, and ANNY is one we own outright: no licence question,
+no gated corpus, no upstream checkpoint.
 
-**This ladder governs availability, not agreement.** Under `Rule.UNANIMOUS` every backend that
-responds must still concur -- N=5/quorum=3 means "at least three voted, and all who voted
-agreed", not "three outvoted two". `Rule.MAJORITY` gives the classical behaviour and carries
-the correlated-failure caveat documented on `adjudicate`.
+A referee is also stronger than a voter. A voter can be outvoted by two estimators making the
+same correlated mistake. The referee cannot: an unreachable pose is rejected even when
+everything agrees on it, because the question is not *do they concur* but *could a body do
+this at all*.
 
-## Agreement is OKS, not pixels
+The fit residual is the measurement, reported as a percentage of stature — matching
+`preflight_audit.py`, where an absolute tolerance "would pass every spot-check and ship"
+because the same millimetre error is negligible on an adult and disqualifying on a child.
 
-Object Keypoint Similarity — COCO's own metric — with per-keypoint sigmas and normalisation by
-person scale. A pixel threshold would call a wrist misplaced by 10px on a 100px figure the same
-as on a 2000px one, and would treat an ankle (loosely localised even by humans, sigma 0.089)
-as strictly as an eye (sigma 0.025).
+**Hands are refereed.** An earlier draft abstained on them, citing
+`anny-pose-retarget-work`'s record that the finger chain was never independently verified.
+That was wrong: "never verified" is not "known broken", `handwear` is one of the 24 tags
+See-Through must separate, and declining to measure does not make a hand correct — it makes
+the defect invisible. Instead the finger path is gated on the specific defect the logbook
+described. A per-joint convention error *compounds with depth* while ordinary fit noise stays
+flat, so `chain_gate` compares residual at MCP, PIP and DIP. Flat passes; climbing is marked
+`HANDS_UNTRUSTED` and counted.
 
-`rf-detr-cpp/keypoint_oks.py` already implements the matching cost; this reuses it rather than
-writing a second definition that can drift from the first.
+Five negative controls ship with it, each targeting a distinct failure, because one control
+only proves the referee is not uniformly permissive:
 
-**Fault conditions**, any of which rejects the sample:
+```
+impossible pose   -> IMPOSSIBLE       body residual 9.00% of stature exceeds 2%
+compounding chain -> HANDS_UNTRUSTED  grows 4.53x from MCP to DIP (limit 1.6)
+hand at body bar  -> IMPOSSIBLE       1.20% exceeds the 0.6% hand bar
+gate not run      -> HANDS_UNTRUSTED  a missing gate is failed, never waived
+missing region    -> NOT_RUN          an absent fit is not a pass
+```
 
-1. pairwise OKS between any two backends below the floor
-2. a backend finds a different number of people
-3. a backend fails or times out — a missing opinion is not a passing vote
-4. fewer than the configured quorum of backends available at all
+## What the referee is for now
 
-Condition 3 matters most and is the easiest to get wrong: a panel that silently proceeds when
-one member is unavailable is a smaller panel that still reports full confidence.
+Not ground truth — that comes from the authored pose. The referee measures whether
+**generation preserved the geometry**:
 
-## Why pythonx
+```
+ANNY pose (licence-clean mocap)
+  -> depth render from the mesh      exact geometry, not an estimate
+  -> ControlNet + JuggernautXL       captions supply language, ANNY supplies shape
+  -> MediaPipe reads it back         pose drift
+  -> referee                         reachable? hands intact?
+```
 
-The four backends are Python (torch, mediapipe, ONNX). Shelling out four times per image pays
-four interpreter starts and four model loads. `pythonx` embeds one CPython in the BEAM, so all
-four stay resident and warm.
+One backend, not a panel: drift is a metric, and a metric needs one instrument. MediaPipe is
+Apache-2.0, verified, and runs on CPU without contending with the generator for the GPU.
 
-One CPython means one GIL, so calls are serialised by a GenServer rather than contended. That
-is correct for this workload anyway: the panel is a batch process over a corpus, not a
-low-latency service, and the four backends compete for one GPU regardless.
+The hand gate matters most here. A corpus was blocklisted for malformed hands; generating its
+replacement with SDXL, whose hands are a known weak point, would reproduce the same defect with
+our own provenance on it. ControlNet pins limb geometry but a hand is a few dozen pixels in the
+depth buffer, so fingers are effectively unconstrained.
+
+## Open, and load-bearing
+
+**The pose corpus is locomotion-only.** 810 clips across eight motion types — idle, forward,
+backward and sideways walk and run, and turn — plus 22 O3DE clips and two UE4 getups. Anime
+illustrations are seldom mid-stride. Whether these poses are useful to See-Through at all is
+unsettled, and it sits upstream of everything above: if the answer is no, the pose corpus is
+the wrong corpus and generating from it produces the wrong distribution.
+
+`python/backend_licenses.py` survives, retargeted from panel backends to the remaining
+dependencies. JuggernautXL's terms for producing a *training corpus* — as against producing
+images — are unread, and several RAIL-family and Civitai licences distinguish the two. The
+ControlNet weights need their own check.
 
 ## Status
 
-Scaffold. No backend is wired yet, and no measurement has been taken.
+Referee implemented, controls passing. No generation has been run and no drift has been
+measured.
