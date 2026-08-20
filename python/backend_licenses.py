@@ -27,10 +27,10 @@ from enum import Enum
 ALLOWED = {"Apache-2.0", "MIT", "BSD-3-Clause", "CC-BY-4.0", "CC0-1.0", "COCO-WholeBody"}
 #: Permitted but flagged. Share-alike obligations on derived MODELS are legally unsettled;
 #: the COCO filter keeps these behind a `share_alike` column rather than deciding for the org.
-FLAGGED = {"CC-BY-SA-4.0", "OpenRAIL-M", "CreativeML-OpenRAIL-M"}
+FLAGGED = {"CC-BY-SA-4.0", "OpenRAIL-M", "CreativeML-OpenRAIL-M", "CreativeML-OpenRAIL++-M"}
 #: Distributed only behind a registration form. The terms cannot be read without accepting
 #: them, so they cannot be gated on -- treated as DENIED until someone accepts and reports.
-GATED = {"GATED-UBody"}
+GATED = {"GATED-UBody", "GATED-acceptance"}
 
 
 class Status(str, Enum):
@@ -88,6 +88,45 @@ ROSTER = [
     Backend("rfdetr", "Apache-2.0", "UNVERIFIED", checked=True,
             note="EXCLUDED on capability, not licence: COCO-17 head, no wholebody checkpoint"),
 ]
+
+#: Generators, checked against the HuggingFace API rather than model cards, 2026-08-19.
+#: The licence cliff falls exactly at XI: every SDXL Juggernaut up to X v10 is OpenRAIL-M,
+#: and the whole XI and Z line is non-commercial. So the vendor's own "why upgrade" table is,
+#: licence-wise, a list of models that cannot be used -- newer is strictly worse here.
+GENERATORS = [
+    Backend("juggernaut-xl-v9", "CreativeML-OpenRAIL-M", "UNVERIFIED", checked=True,
+            note="216,745 downloads -- the actually-supported successor. Best quality pick."),
+    Backend("juggernaut-x-v10", "CreativeML-OpenRAIL-M", "UNVERIFIED", checked=True,
+            note="17,255 downloads. X-generation, same licence class as v6."),
+    Backend("juggernaut-xl-lightning", "CreativeML-OpenRAIL-M", "UNVERIFIED", checked=True,
+            note="12,948 downloads. FEW-STEP -- lands on the step-reduction lever, which was "
+                 "ranked the largest single payoff. Best-exercised of the distilled options."),
+    Backend("juggernaut-x-hyper", "CreativeML-OpenRAIL-M", "UNVERIFIED", checked=True,
+            note="352 downloads. FEW-STEP and X-generation, but thinly used next to Lightning."),
+    Backend("juggernaut-xl-v6", "CreativeML-OpenRAIL-M", "UNVERIFIED", checked=True,
+            note="CURRENT. See-Through's LayerDiffuse base, via the frankjoshua mirror."),
+    Backend("juggernaut-xi-v11", "CC-BY-NC-ND-4.0", "UNVERIFIED", checked=True,
+            note="DENIED twice. NC is the class that dropped Sapiens; ND is rejected by "
+                 "filter_coco_licenses' own comment -- training/derived work is a derivative."),
+    Backend("juggernaut-xi-lightning", "CC-BY-NC-ND-4.0", "UNVERIFIED", checked=True,
+            note="DENIED. The newest few-step model, and unusable -- Lightning/Hyper below XI "
+                 "are the only distilled options that survive."),
+    Backend("juggernaut-z-image", "CC-BY-NC-4.0", "UNVERIFIED", checked=True,
+            note="DENIED. Also Lumina-Image-2, which would strand the SDXL ggml port."),
+    Backend("juggernaut-z-image-fast", "CC-BY-NC-4.0", "UNVERIFIED", checked=True,
+            note="DENIED, same line."),
+    Backend("juggernaut-pro-flux", "GATED-acceptance", "UNVERIFIED", checked=True,
+            note="DENIED. HF returns 401 -- terms unreadable without accepting them, the UBody "
+                 "situation again. FLUX.1-dev underneath is non-commercial besides."),
+]
+
+#: OpenRAIL-M stays FLAGGED rather than ALLOWED, and that is not a formality. It is neither NC
+#: nor ND, so the COCO filter's categories do not decide it, and every RunDiffusion model adds
+#: "may not be deployed behind paid API services without explicit licensing". That policy call
+#: has not been made -- and it already applies to v6, which is in use today.
+#:
+#: Unresolved and separate: whether generating a TRAINING CORPUS is permitted, as against
+#: generating images. Several RAIL-family licences draw that line explicitly.
 
 
 def classify(license_id: str) -> Status:
