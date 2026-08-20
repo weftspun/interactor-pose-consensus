@@ -65,7 +65,7 @@ That was wrong: "never verified" is not "known broken", `handwear` is one of the
 See-Through must separate, and declining to measure does not make a hand correct — it makes
 the defect invisible. Instead the finger path is gated on the specific defect the logbook
 described. A per-joint convention error *compounds with depth* while ordinary fit noise stays
-flat, so `chain_gate` compares residual at MCP, PIP and DIP. Flat passes; climbing is marked
+flat, so `chain_gate` compares residual at MCP, PIP and DIP. Flat passes. Climbing is marked
 `HANDS_UNTRUSTED` and counted.
 
 Five negative controls ship with it, each targeting a distinct failure, because one control
@@ -95,7 +95,7 @@ ANNY pose (licence-clean mocap)
 One backend, not a panel: drift is a metric, and a metric needs one instrument. MediaPipe is
 Apache-2.0, verified, and runs on CPU without contending with the generator for the GPU.
 
-The hand gate matters most here. A corpus was blocklisted for malformed hands; generating its
+The hand gate matters most here. A corpus was blocklisted for malformed hands. Generating its
 replacement with SDXL, whose hands are a known weak point, would reproduce the same defect with
 our own provenance on it. ControlNet pins limb geometry but a hand is a few dozen pixels in the
 depth buffer, so fingers are effectively unconstrained.
