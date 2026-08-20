@@ -48,11 +48,14 @@ from __future__ import annotations
 
 import torch
 
-from silhouette import Camera, soft_silhouette
+from silhouette import (Camera, _block_pixels, _morton_order, _work_items,
+                        ELEM_BUDGET, influence_pad, soft_silhouette, tau_for_bleed)
 
 
 def soft_depth(verts: torch.Tensor, faces: torch.Tensor, cam: Camera,
-               tau: float = 1.0, chunk: int = 2048) -> tuple[torch.Tensor, torch.Tensor]:
+               tau: float | None = None, chunk: int | None = None,
+               cull: bool = True, max_faces: int = 4096,
+               budget: float | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """Differentiable depth and coverage. Returns (depth, weight), each (H, W).
 
     A silhouette is the union of every face regardless of depth order, which is what let it
@@ -74,28 +77,45 @@ def soft_depth(verts: torch.Tensor, faces: torch.Tensor, cam: Camera,
     surfaces parallel to the image plane, which is the one case where the depth term has
     nothing to say anyway.
 
+    `tau` defaults to half a pixel of bleed at this mesh's face count, not to a constant.
+
     `weight` is returned rather than folded away because it is the coverage mask, and the
     alignment below must only be solved over pixels the body actually covers. Aligning over
     empty background would fit the affine parameters to nothing.
     """
-    ys, xs = torch.meshgrid(
-        torch.arange(cam.height, device=verts.device, dtype=verts.dtype),
-        torch.arange(cam.width, device=verts.device, dtype=verts.dtype), indexing="ij")
-    px = torch.stack([xs.reshape(-1), ys.reshape(-1)], dim=-1)
+    if tau is None:
+        tau = tau_for_bleed(0.5, faces.shape[0])
 
     from silhouette import _inside_distance
     tri2d = cam.project(verts)[faces]                          # (F, 3, 2)
     v_cam = (cam.view.to(verts) @ torch.cat(
         [verts, torch.ones_like(verts[:, :1])], -1).T).T[:, :3]
     z_vert = v_cam[:, 2].clamp(min=1e-4)[faces]                # (F, 3) per-corner depth
-    z_face = z_vert.mean(-1)
 
-    num = torch.zeros(px.shape[0], device=verts.device, dtype=verts.dtype)
+    # Faces are reordered for screen locality so each block covers a small rectangle. The
+    # depths must ride along, or every face would be paired with another face's depth -- a
+    # reordering bug that renders a plausible map of the wrong body.
+    order = _morton_order(tri2d) if cull else torch.arange(tri2d.shape[0], device=tri2d.device)
+    tri2d, z_vert = tri2d[order], z_vert[order]
+    z_face = z_vert.mean(-1)
+    pad = influence_pad(tau, tri2d.shape[0])
+    # `max_faces` and `budget` are the THROUGHPUT KNOB, not tuning noise. Smaller blocks have
+    # tighter bounding boxes and do less arithmetic; larger blocks launch fewer kernels. The
+    # first bounds work, the second bounds overhead, and which one dominates is measured
+    # rather than assumed -- see the sweep recorded in `_controls`.
+    if budget is None:
+        budget = ELEM_BUDGET if chunk is None else float(chunk) * cam.height * cam.width
+
+    n_px = cam.height * cam.width
+    num = torch.zeros(n_px, device=verts.device, dtype=verts.dtype)
     den = torch.zeros_like(num)
     beta = max(float(z_face.detach().std()) if z_face.numel() > 1 else 1.0, 1e-3)
     zmin = z_face.min()
-    for i in range(0, tri2d.shape[0], chunk):
-        t = tri2d[i:i + chunk]                                 # (f, 3, 2)
+    for i0, i1, y0, y1, x0, x1 in _work_items(
+            tri2d, pad, cam.height, cam.width, cull=cull, budget=budget,
+            max_faces=max_faces):
+        px, idx = _block_pixels(y0, y1, x0, x1, cam.width, verts.device, verts.dtype)
+        t = tri2d[i0:i1]                                       # (f, 3, 2)
         a, b, c = t[:, 0], t[:, 1], t[:, 2]
 
         def cross(u, v):
@@ -108,16 +128,32 @@ def soft_depth(verts: torch.Tensor, faces: torch.Tensor, cam: Camera,
         wb = cross(a[:, None] - c[:, None], P - c[:, None]) / safe
         wc = 1.0 - wa - wb
         # Perspective-correct: 1/z is what is linear in screen space.
-        inv = (wa / z_vert[i:i + chunk, 0, None]
-               + wb / z_vert[i:i + chunk, 1, None]
-               + wc / z_vert[i:i + chunk, 2, None])
-        z_px = 1.0 / inv.clamp(min=1e-9)                       # (f, P) depth at each pixel
+        zc = z_vert[i0:i1]
+        inv = (wa / zc[:, 0, None] + wb / zc[:, 1, None] + wc / zc[:, 2, None])
+        # RETRACTED: `z_px = 1.0 / inv.clamp(min=1e-9)`, which was unbounded.
+        #
+        # Every pixel is evaluated against every face in reach, and OUTSIDE a triangle the
+        # barycentric weights are negative. So `inv` crosses zero somewhere on the plane, the
+        # clamp turns that into a depth of 1e9, and those pixels enter the weighted mean.
+        #
+        # `cov` cannot suppress them and no `tau` makes it. The sigmoid is 0.5 ON the edge by
+        # construction, so a pixel just outside contributes 0.5 * 1e9. Measured on ANNY at
+        # 256x256: inside the triangles z_px was 2.873 .. 2.922 against a true face range of
+        # 2.701 .. 3.318, and correct. Over all pixels it reached 1.000e+09, and the rendered
+        # depth came back 2.0e5 .. 4.5e8 for a body 1.7 m tall at 5 m. Nothing raised.
+        #
+        # The bound is the triangle's OWN corner depths. A perspective-correct interpolation
+        # is a convex combination of the corners, so inside the triangle the result already
+        # lies in [min, max] and the clamp is a no-op there -- it changes no correct pixel and
+        # no correct gradient. Outside, it saturates to a depth that face could actually have.
+        z_px = (1.0 / inv.clamp(min=1e-9)).clamp(
+            min=zc.min(-1).values[:, None], max=zc.max(-1).values[:, None])
 
         d = _inside_distance(px, t)
         cov = torch.sigmoid(d / tau)
-        w = cov * torch.exp(-(z_face[i:i + chunk, None] - zmin) / beta)
-        num = num + (w * z_px).sum(0)
-        den = den + w.sum(0)
+        w = cov * torch.exp(-(z_face[i0:i1, None] - zmin) / beta)
+        num = num.index_add(0, idx, (w * z_px).sum(0))
+        den = den.index_add(0, idx, w.sum(0))
     depth = num / den.clamp(min=1e-9)
     return depth.reshape(cam.height, cam.width), den.reshape(cam.height, cam.width)
 
