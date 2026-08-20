@@ -76,11 +76,25 @@ IMPOSSIBLE_RESIDUAL = 0.02
 #: 1.7 m adult -- about a AAA battery's diameter (10.5 mm).
 HAND_RESIDUAL = 0.006
 
-#: How much residual may grow from the base of a finger chain to its tip before the growth is
-#: read as the logbook's compounding-convention defect rather than ordinary fit noise. A
-#: convention error roughly compounds per joint; noise does not. 1.6x across two joints of
-#: depth is comfortably above measurement scatter and well below true compounding.
+#: How much disagreement may grow from knuckle to fingertip before it reads as the generator
+#: losing fingers rather than ordinary measurement scatter. Applied across three joints of
+#: depth (MCP -> TIP), so it is a per-chain figure, not per-joint.
 CHAIN_GROWTH_LIMIT = 1.6
+
+#: MediaPipe hand landmarks are anatomically indexed: 0 is the wrist, then four joints per
+#: finger in order. Depth 1 is the knuckle (MCP), depth 4 the fingertip (TIP). The thumb's
+#: chain is CMC/MCP/IP/TIP -- a different anatomy with the same depth ordering, which is all
+#: this gate uses.
+#:
+#: This is why the correspondence here is principled where the face's was not. Both sides are
+#: anatomically NAMED: MediaPipe's index-MCP and ANNY's index-MCP are the same joint by
+#: definition, not by a learned association someone hand-authored and could get wrong.
+MP_HAND_DEPTH: dict[int, tuple[int, ...]] = {
+    1: (1, 5, 9, 13, 17),    # MCP / thumb CMC -- knuckles
+    2: (2, 6, 10, 14, 18),   # PIP / thumb MCP
+    3: (3, 7, 11, 15, 19),   # DIP / thumb IP
+    4: (4, 8, 12, 16, 20),   # TIP -- fingertips
+}
 
 
 class RefereeCall(str, Enum):
@@ -136,44 +150,80 @@ class RefereeVerdict:
         return f"{mm:.1f} mm (about {stack})"
 
 
-def chain_gate(residual_by_depth: dict[int, np.ndarray]) -> ChainGate:
-    """Test the finger chain for the logbook's compounding-convention defect.
+def hand_gate(mp_hand: np.ndarray, anny_hand: np.ndarray, stature: float) -> ChainGate:
+    """Cross-check MediaPipe's read of a generated hand against the hand ANNY authored.
 
-    A per-joint convention error does not stay put: it accumulates as the chain is composed,
-    so DIP residual runs well above MCP residual. Ordinary fit noise is roughly flat with
-    depth. Comparing depths therefore separates the two, where comparing magnitudes alone
-    cannot -- a large flat error is a bad fit, a small growing one is the bug.
+    `mp_hand` is MediaPipe's 21 landmarks as read FROM THE GENERATED IMAGE. `anny_hand` is the
+    same 21 joints projected from the rig -- the pose we posed. Both (21, 2) in image pixels;
+    `stature` is the figure's stature in the same pixels.
 
-    Requires all three depths. Two points cannot distinguish a trend from a fluctuation, and
-    guessing from two would be the convenient proxy rather than the physical quantity.
+    ## Why this replaces the earlier fit-residual gate
+
+    The first version fitted ANNY to the keypoints and asked whether the finger chain FIT
+    plausibly, to detect a per-joint convention bug in the retarget path. That tests the
+    tooling. It is not what threatens the corpus.
+
+    Because the pose is authored, one side here is ground truth by construction. There is no
+    inference to trust and nothing to adjudicate: a gap between the two is the GENERATOR
+    drawing a hand that is not the hand it was given. That is the defect a corpus was already
+    blocklisted over, so it is the one worth measuring.
+
+    ## Depth is the discriminator, not magnitude
+
+    A whole hand offset by a few pixels is a registration difference and harmless -- both sides
+    still describe the same hand. The characteristic diffusion failure is different in kind:
+    palm and knuckles land correctly while fingers dissolve, fuse or multiply toward the tips.
+    That shows up as disagreement GROWING WITH DEPTH, MCP -> PIP -> DIP -> TIP.
+
+    So magnitude alone cannot separate "slightly misregistered hand" from "melted fingers",
+    and depth can. Reporting only a mean distance over 21 landmarks would average the intact
+    knuckles against the ruined tips and understate the failure -- which is exactly the effect
+    `anny_rig.py` already warns about, that a mean understates hand error several-fold.
+
+    All four depths are required. Two points cannot tell a trend from a fluctuation, and
+    inferring one from two would be the convenient proxy in place of the physical quantity.
     """
-    missing = [d for d in (1, 2, 3) if d not in residual_by_depth]
-    if missing:
-        return ChainGate(passed=False, detail=f"no residual at depth {missing} -- cannot test")
+    if mp_hand.shape[:1] != (21,) or anny_hand.shape[:1] != (21,):
+        return ChainGate(passed=False,
+                         detail=f"expected 21 landmarks a side, got {mp_hand.shape[0]} "
+                                f"and {anny_hand.shape[0]}")
+    if not np.isfinite(mp_hand).all():
+        # MediaPipe found no hand at all. That is a FAILURE, not a pass: a hand the detector
+        # cannot see is the strongest evidence the generator drew something unusable.
+        return ChainGate(passed=False,
+                         detail="MediaPipe returned no hand -- unreadable, not agreeing")
 
-    med = {d: float(np.median(residual_by_depth[d])) for d in (1, 2, 3)}
+    d = np.linalg.norm(mp_hand - anny_hand, axis=-1) / max(stature, 1e-9)
+    med = {depth: float(np.median(d[list(idx)])) for depth, idx in MP_HAND_DEPTH.items()}
     base = max(med[1], 1e-9)
-    growth = med[3] / base
+    growth = med[4] / base
     if growth > CHAIN_GROWTH_LIMIT:
         return ChainGate(
             passed=False, by_depth=med, growth=growth,
-            detail=f"residual grows {growth:.2f}x from MCP to DIP (limit "
-                   f"{CHAIN_GROWTH_LIMIT}) -- the compounding signature the logbook flagged",
+            detail=f"disagreement grows {growth:.2f}x from knuckle to fingertip (limit "
+                   f"{CHAIN_GROWTH_LIMIT}) -- the generator lost the fingers",
+        )
+    if med[4] > HAND_RESIDUAL:
+        return ChainGate(
+            passed=False, by_depth=med, growth=growth,
+            detail=f"fingertips off by {100 * med[4]:.2f}% of stature, flat with depth -- "
+                   f"the whole hand is misplaced rather than melted",
         )
     return ChainGate(passed=True, by_depth=med, growth=growth,
-                     detail=f"flat with depth ({growth:.2f}x): local error, not compounding")
+                     detail=f"flat with depth ({growth:.2f}x): the drawn hand is the posed hand")
 
 
 def referee(
     fit_residuals: dict[str, np.ndarray],
     stature: float,
-    finger_depths: dict[str, dict[int, np.ndarray]] | None = None,
+    hands: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> RefereeVerdict:
     """Judge a completed ANNY fit across all five regions.
 
     `fit_residuals` maps each region to per-keypoint distances in the rig's units, as produced
-    by an AnnyInverter solve. `finger_depths` carries the per-depth residuals the hand gate
-    needs, keyed by hand then by depth.
+    by an AnnyInverter solve. `hands` carries, per hand, the pair the hand gate cross-checks:
+    (MediaPipe's 21 landmarks read from the generated image, the same 21 joints projected from
+    the authored ANNY pose).
 
     Median, not mean and not max: one badly-placed joint should neither condemn an otherwise
     reachable pose nor average itself away against a well-fitted torso. `preflight_audit`
@@ -210,12 +260,14 @@ def referee(
                        f"{HAND_RESIDUAL * 100:.1f}%",
             )
 
-    # The hand numbers are only admissible if the finger path passed its depth gate. Running
-    # the gate is mandatory: absent depth data is a failed gate, not a waived one.
+    # The hands are only admissible if the drawn hand matches the posed one. Running the gate
+    # is mandatory: an absent cross-check is a failed gate, never a waived one.
     gates: dict[str, ChainGate] = {}
     untrusted: list[str] = []
     for h in HANDS:
-        g = chain_gate((finger_depths or {}).get(h, {}))
+        pair = (hands or {}).get(h)
+        g = (hand_gate(pair[0], pair[1], stature) if pair is not None
+             else ChainGate(passed=False, detail="no MediaPipe/ANNY cross-check supplied"))
         gates[h] = g
         if not g.passed:
             untrusted.append(h)
@@ -232,10 +284,34 @@ def _flat(n: int, v: float) -> np.ndarray:
     return np.full(n, v)
 
 
-def _good_hands() -> dict[str, dict[int, np.ndarray]]:
-    """Depth residuals that are flat -- ordinary noise, no compounding."""
-    return {h: {1: _flat(5, 0.0030), 2: _flat(5, 0.0032), 3: _flat(5, 0.0034)}
-            for h in HANDS}
+def _anny_hand() -> np.ndarray:
+    """A posed hand: wrist at the origin, five chains fanning out, four joints deep.
+
+    Coordinates are a fraction of stature, matching how the gate normalises. A real hand spans
+    roughly 11% of stature, so the tips land near that.
+    """
+    pts = [(0.0, 0.0)]
+    for finger in range(5):
+        angle = -0.6 + 0.3 * finger
+        for depth in range(1, 5):
+            r = 0.03 * depth
+            pts.append((r * np.cos(angle), r * np.sin(angle)))
+    return np.array(pts, dtype=float)
+
+
+def _drawn_hand(offset: float = 0.0, tip_drift: float = 0.0) -> np.ndarray:
+    """What MediaPipe reads back. `offset` shifts the whole hand (registration); `tip_drift`
+    grows with depth (the generator melting the fingers)."""
+    h = _anny_hand().copy()
+    h += offset
+    for depth, idx in MP_HAND_DEPTH.items():
+        h[list(idx)] += tip_drift * depth
+    return h
+
+
+def _good_hands() -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """A drawn hand that matches the posed one to within ordinary scatter."""
+    return {h: (_drawn_hand(offset=0.0008), _anny_hand()) for h in HANDS}
 
 
 def negative_controls() -> None:
@@ -248,34 +324,47 @@ def negative_controls() -> None:
     # 1. A pose no human reaches.
     broken = {r: _flat(n, 0.09) for r, n in
               (("body", 17), ("feet", 6), ("face", 68), ("left_hand", 21), ("right_hand", 21))}
-    v = referee(broken, stature=1.0, finger_depths=_good_hands())
+    v = referee(broken, stature=1.0, hands=_good_hands())
     assert v.call is RefereeCall.IMPOSSIBLE, "referee accepted an impossible pose"
     print(f"  impossible pose   -> {v.call.name}: {v.detail}")
 
-    # 2. The logbook's compounding finger error -- small at the knuckle, large at the tip.
+    # 2. Melted fingers: knuckles land, tips wander. The defect the corpus was blocked over.
     ok = {"body": _flat(17, 0.004), "feet": _flat(6, 0.004), "face": _flat(68, 0.002),
           "left_hand": _flat(21, 0.003), "right_hand": _flat(21, 0.003)}
-    compounding = {h: {1: _flat(5, 0.0015), 2: _flat(5, 0.0032), 3: _flat(5, 0.0068)}
-                   for h in HANDS}
-    v = referee(ok, stature=1.0, finger_depths=compounding)
-    assert v.call is RefereeCall.HANDS_UNTRUSTED, "referee trusted a compounding finger chain"
+    melted = {h: (_drawn_hand(tip_drift=0.0015), _anny_hand()) for h in HANDS}
+    v = referee(ok, stature=1.0, hands=melted)
+    assert v.call is RefereeCall.HANDS_UNTRUSTED, "referee trusted a hand with melted fingers"
     assert set(v.untrusted) == set(HANDS)
-    print(f"  compounding chain -> {v.call.name}: {v.detail}")
+    print(f"  melted fingers    -> {v.call.name}: {v.detail}")
+
+    # 2b. A hand shifted bodily but internally intact. Must NOT be called melted -- the
+    #     distinction between misregistration and lost fingers is the point of the gate.
+    shifted = {h: (_drawn_hand(offset=0.02), _anny_hand()) for h in HANDS}
+    v = referee(ok, stature=1.0, hands=shifted)
+    assert v.call is RefereeCall.HANDS_UNTRUSTED, "a badly misplaced hand was accepted"
+    assert "misplaced rather than melted" in v.detail, "misregistration misreported as melting"
+    print(f"  shifted hand      -> {v.call.name}: distinguished from melting")
+
+    # 2c. MediaPipe found no hand. Unreadable is a failure, never a pass.
+    blank = {h: (np.full((21, 2), np.nan), _anny_hand()) for h in HANDS}
+    v = referee(ok, stature=1.0, hands=blank)
+    assert v.call is RefereeCall.HANDS_UNTRUSTED, "an undetectable hand was accepted"
+    print(f"  no hand detected  -> {v.call.name}")
 
     # 3. A hand within the body tolerance but outside the hand tolerance. Without a separate
     #    hand bar this passes, which is the whole reason HAND_RESIDUAL exists.
     loose = dict(ok, left_hand=_flat(21, 0.012))
-    v = referee(loose, stature=1.0, finger_depths=_good_hands())
+    v = referee(loose, stature=1.0, hands=_good_hands())
     assert v.call is RefereeCall.IMPOSSIBLE, "hand judged at the body tolerance"
     print(f"  hand at body bar  -> {v.call.name}: {v.detail}")
 
     # 4. No depth data at all. Must fail the gate rather than waive it.
-    v = referee(ok, stature=1.0, finger_depths=None)
+    v = referee(ok, stature=1.0, hands=None)
     assert v.call is RefereeCall.HANDS_UNTRUSTED, "a missing gate was waived"
     print(f"  gate not run      -> {v.call.name}")
 
     # 5. A missing region must not read as a pass.
-    v = referee({"body": _flat(17, 0.004)}, stature=1.0, finger_depths=_good_hands())
+    v = referee({"body": _flat(17, 0.004)}, stature=1.0, hands=_good_hands())
     assert v.call is RefereeCall.NOT_RUN, "a missing fit was treated as a pass"
     print(f"  missing region    -> {v.call.name}: {v.detail}")
 
@@ -286,7 +375,7 @@ if __name__ == "__main__":
 
     ok = {"body": _flat(17, 0.004), "feet": _flat(6, 0.004), "face": _flat(68, 0.002),
           "left_hand": _flat(21, 0.003), "right_hand": _flat(21, 0.003)}
-    v = referee(ok, stature=1.0, finger_depths=_good_hands())
+    v = referee(ok, stature=1.0, hands=_good_hands())
     assert v.call is RefereeCall.FITS, "referee rejected a reachable pose"
     print("\npositive control (MUST be accepted):")
     print(f"  reachable pose    -> {v.call.name}")
