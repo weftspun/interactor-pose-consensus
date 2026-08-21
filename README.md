@@ -31,7 +31,7 @@ third seat:
 | Sapiens             | CC-BY-NC — the exact class `filter_coco_licenses.py` drops               |
 | DWPose / RTMW       | Apache-2.0 weights, but trained on UBody, distributed only behind a form |
 | GEM-X               | NVlabs, terms unresolved                                                 |
-| SDPose              | OpenRAIL-M use-restrictions, undecided                                   |
+| SDPose              | OpenRAIL-M — decided by role since; passthrough, so FLAGGED not DENIED   |
 | OpenPose, AlphaPose | non-commercial                                                           |
 | RF-DETR             | COCO-17 head, no wholebody checkpoint                                    |
 
@@ -87,18 +87,36 @@ Not ground truth — that comes from the authored pose. The referee measures whe
 ```
 ANNY pose (licence-clean mocap)
   -> depth render from the mesh      exact geometry, not an estimate
-  -> ControlNet + JuggernautXL       captions supply language, ANNY supplies shape
+  -> depth-conditioned generator     captions supply language, ANNY supplies shape
   -> MediaPipe reads it back         pose drift
   -> referee                         reachable? hands intact?
 ```
 
+**Retracted: that row read `ControlNet + JuggernautXL`.** CLAUDE.md closes it, and not on a
+technicality. JuggernautXL is OpenRAIL-M, and the OpenRAIL rule turns on what the model is
+_for_: rendering an ANNY pose and generating over it is _operationally_ passthrough — our own
+asset in, geometry preserved, appearance changed — but its destination is a training corpus,
+which is the generator case. Destination wins, because destination is what the restriction is
+about. Once the terms are inside somebody's weights there is nothing left to inspect.
+
+So the route is closed and the referee is unaffected. Drift is measured against the render, not
+against the generator, so replacing the generator does not change what is measured. What it
+changes is the interface: `python/backend_licenses.py` now admits three depth-conditionable,
+licence-clean candidates — `z-image-turbo`, `qwen-image`, `kolors` — and choosing among them is
+open. `z-image-turbo` is the only one whose weights fit an 8 GB device at INT4, and CLAUDE.md
+records that the first two are one lineage wearing two names, so `kolors` is the only row that
+addresses common-mode exposure at all.
+
 One backend, not a panel: drift is a metric, and a metric needs one instrument. MediaPipe is
 Apache-2.0, verified, and runs on CPU without contending with the generator for the GPU.
 
-The hand gate matters most here. A corpus was blocklisted for malformed hands. Generating its
-replacement with SDXL, whose hands are a known weak point, would reproduce the same defect with
-our own provenance on it. ControlNet pins limb geometry but a hand is a few dozen pixels in the
-depth buffer, so fingers are effectively unconstrained.
+The hand gate matters most here, and it survives the change of generator intact. A corpus was
+blocklisted for malformed hands. Generating its replacement with a model that malforms them
+differently is not an improvement, it is the same defect with our provenance on it. That
+argument was written about SDXL and does not depend on SDXL: no candidate above has had its
+hand quality measured, so the gate is what stands between an unmeasured generator and a corpus.
+A depth control pins limb geometry, but a hand is a few dozen pixels in the depth buffer, so
+fingers are effectively unconstrained whatever conditions the rest of the body.
 
 ## Open, and load-bearing
 
@@ -109,9 +127,64 @@ unsettled, and it sits upstream of everything above: if the answer is no, the po
 the wrong corpus and generating from it produces the wrong distribution.
 
 `python/backend_licenses.py` survives, retargeted from panel backends to the remaining
-dependencies. JuggernautXL's terms for producing a _training corpus_ — as against producing
-images — are unread, and several RAIL-family and Civitai licences distinguish the two. The
-ControlNet weights need their own check.
+dependencies. This paragraph used to leave JuggernautXL's terms for producing a _training
+corpus_ — as against producing images — recorded as unread. They are read now, and the reading
+is above: OpenRAIL-M is blocked as a generator and permitted as passthrough, so the question was
+never about JuggernautXL's terms specifically but about what the output is for.
+
+**The ControlNet weights now have their own check.** That sentence used to end this paragraph
+as a to-do, and the to-do was the defect: `Backend` carried two licences and a generator has
+three. Control weights are a separate release under separate terms, so a base-licence check
+admits FLUX.1 [schnell] (Apache-2.0) and HiDream-I1 (MIT), neither of which has a readable way
+to be conditioned. Every corpus use renders an ANNY pose and requires the generated image to
+keep that geometry, so the control is the term that decides.
+
+`control_license` is now a third axis on `Backend`, `gate()` takes the worst of three, and
+`GENERATORS` is gated rather than merely listed. Running the module prints:
+
+```
+depth-conditionable and licence-clean (3): z-image-turbo, qwen-image, kolors
+```
+
+which re-derives CLAUDE.md's survey from the table instead of recalling it. Four rows fail on
+the control alone with a clean base — `qwen-image-edit`, `flux-schnell`, `hidream-i1`, `sana`
+— and `sana` fails on `NO-DEPTH-CHECKPOINT` rather than on terms, because its licence is clean
+end to end and its released weights are HED only. That distinction is kept because the remedy
+differs: a licence failure is permanent, a missing checkpoint is a training job someone could
+cost.
+
+Corpus terms are `UNVERIFIED` for **every** generator, so none is admitted. That is condition 1
+of the synthetic-data rule going unanswered by the whole field at once, not an oversight in one
+row, and the output says so rather than leaving it to be inferred.
+
+**Two models one prefix apart have opposite verdicts.** `juggernaut-z-image` is CC-BY-NC-4.0,
+RunDiffusion's finetune. `z-image-turbo` is Apache-2.0, Tongyi-MAI's base. A search for
+`z-image` returns one of each. Control 1 asserts they classify differently, so the distinction
+is executed rather than commented.
+
+Six negative controls ship with it, in `python/test_backend_licenses.py`. Control 2 runs the
+retracted two-axis gate and asserts it MISSES what the three-axis gate catches — it still
+refuses `flux-schnell`, but on the corpus, so a reader who later verified the corpus would
+admit an unconditionable model. Each control was checked against a re-introduced defect:
+
+```
+control axis ignored                  -> 2, 4, 6 fail
+z-image-turbo read as the NC finetune -> 1 fails
+untagged control read as clear        -> 5 fails
+unsurveyed control renders OK         -> 3 fails
+role not passed to gate()             -> 7 fails
+one generator row forgets its role    -> 8 fails
+```
+
+Six defects, eight controls, and no control fires on a defect it does not target.
+
+**Controls 7 and 8 close a rule that was implemented and unreachable.** `classify` has always
+taken a role, `Role` has always been defined, and `gate` — its only caller — never passed one,
+because `Backend` had no field to carry it. So every OpenRAIL row took the strict branch by
+accident rather than by the rule: `sdpose` read DENIED for the right verdict and the wrong
+reason, and would have kept reading DENIED if the rule had later gone the other way. `Backend`
+carries `role` now and `gate` passes it on all three axes. No verdict in the table changed,
+which is the point — the reasons did.
 
 ## Status
 
