@@ -180,7 +180,7 @@ def align_affine(pred: torch.Tensor, ref: torch.Tensor,
 
 def depth_loss(verts: torch.Tensor, faces: torch.Tensor, target_depth: torch.Tensor,
                cam: Camera, tau: float = 1.0,
-               min_coverage: float = 1e-3) -> torch.Tensor:
+               min_coverage: float = 1e-3, report_alignment: bool = False):
     """Scale-and-shift-invariant depth residual against a predicted depth map.
 
     `target_depth` is Marigold's output, affine-invariant. The alignment is solved here, on
@@ -195,7 +195,8 @@ def depth_loss(verts: torch.Tensor, faces: torch.Tensor, target_depth: torch.Ten
     mask = weight / weight.max().clamp(min=1e-9)
     a, b = align_affine(target_depth, rendered, mask)
     resid = (a * target_depth + b - rendered) ** 2
-    return (mask * resid).sum() / mask.sum().clamp(min=min_coverage)
+    loss = (mask * resid).sum() / mask.sum().clamp(min=min_coverage)
+    return (loss, a, b) if report_alignment else loss
 
 
 def coverage_ok(verts: torch.Tensor, faces: torch.Tensor, cam: Camera,
